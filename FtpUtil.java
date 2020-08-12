@@ -11,13 +11,10 @@ import org.apache.commons.net.ftp.FTPFile;
 import org.apache.commons.net.ftp.FTPReply;
 import org.apache.poi.util.IOUtils;
 import org.springframework.util.CollectionUtils;
-import org.springframework.web.multipart.MultipartFile;
-import sun.net.ftp.FtpClient;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * @ClassName FtpUtil
@@ -111,21 +108,19 @@ public class FtpUtil {
         boolean returnValue = false;
         // 上传文件
         try {
-            // 设置传输二进制文件
-            ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
             //被动模式，开启端口传输数据
             ftpClient.enterLocalPassiveMode();
-
-            createDirecroty(remoteFilePath, ftpClient);
+            // 设置传输二进制文件
+            ftpClient.setFileType(FTPClient.BINARY_FILE_TYPE);
             //判断并设置ftp编码为utf-8或者本地编码
             setFtpEncoding(ftpClient);
+            createDirecroty(remoteFilePath, ftpClient);
+
             // 上传文件到ftp
             returnValue = ftpClient.storeFile(new String(fileName.getBytes(LOCAL_CHARSET), SERVER_CHARSET), inputStream);
 
         } catch (Exception e) {
-            returnValue = false;
             log.error("上传文件到服务器失败", e);
-            return returnValue;
         } finally {
             try {
                 if (inputStream != null) {
@@ -142,23 +137,25 @@ public class FtpUtil {
      * 上传文件
      *
      * @param ftpClient
-     * @param multipartFile
+     * @param file
      * @param remote
      * @return
      * @throws Exception
      */
-    public static APIResponse upload(FTPClient ftpClient, MultipartFile multipartFile, String remote) throws Exception {
+    public synchronized static APIResponse upload(FTPClient ftpClient, File file, String remote) throws Exception {
         // 设置PassiveMode传输
         ftpClient.enterLocalPassiveMode();
         // 设置以二进制流的方式传输
         ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
         //判断并设置ftp编码为utf-8或者本地编码
         setFtpEncoding(ftpClient);
-        boolean result;
-        File file = FileUtil.multipartFileToFile(multipartFile);
-
         //远程文件名
         String remoteFileName = remote.substring(remote.lastIndexOf("/") + 1);
+        boolean result;
+        log.info("-------------------");
+        log.info("|当前文件的大小：{}B|", file.length());
+        log.info("-------------------");
+
         // 创建服务器远程目录
         createDirecroty(remote, ftpClient);
 
@@ -168,8 +165,10 @@ public class FtpUtil {
             long remoteSize = files[0].getSize();
             long localSize = file.length();
             if (remoteSize == localSize) {
-                return APIResponse.returnFail(EventEnum.FILE_EXISTS);
+                log.warn("文件【{}】已存在", files[0]);
+                return APIResponse.returnSuccess();
             } else if (remoteSize > localSize) {
+                log.warn("远程文件大于本地文件：{}>{}", remoteSize, localSize);
                 return APIResponse.returnFail(EventEnum.REMOTE_ISBIGGERTHAN_LOCAL);
             }
 
@@ -250,6 +249,14 @@ public class FtpUtil {
         String dir = remoteFilePath.substring(0, remoteFilePath.lastIndexOf("/"));
         String file = remoteFilePath.substring(remoteFilePath.lastIndexOf("/") + 1);
         try {
+            int reply;
+            reply = ftpClient.getReplyCode();
+            ftpClient.setFileType(FTPClient.BINARY_FILE_TYPE);
+            if (!FTPReply.isPositiveCompletion(reply)) {
+                log.error("连接不上ftp服务器，错误码：{}" + ftpClient.getReply());
+                ftpClient.disconnect();
+                return null;
+            }
             ftpClient.enterLocalPassiveMode();
             // 判断并设置ftp编码为utf-8或者本地编码
             setFtpEncoding(ftpClient);
@@ -306,7 +313,7 @@ public class FtpUtil {
      * 递归创建远程服务器目录
      *
      * @param remoteFilePath 远程服务器文件绝对路径
-     * @param ftpClient FTPClient对象
+     * @param ftpClient      FTPClient对象
      * @return 目录创建是否成功
      * @throws IOException
      */
@@ -314,7 +321,7 @@ public class FtpUtil {
         String directory = remoteFilePath.substring(0, remoteFilePath.lastIndexOf("/") + 1);
         String dirName = new String(directory.getBytes(LOCAL_CHARSET), SERVER_CHARSET);
         //cd到根目录
-        boolean a = ftpClient.changeWorkingDirectory("/");
+        ftpClient.changeWorkingDirectory("/");
         String[] dirs = dirName.split("/");
         for (String dir : dirs) {
             if (null == dir || "".equals(dir)) {
@@ -338,7 +345,7 @@ public class FtpUtil {
      * @param targetFilePath
      * @return
      */
-    public static boolean removeFiles(FTPClient ftpClient, String fileName, String targetPicPath, String targetFilePath, String tempFilePath) {
+    public static boolean removeFiles(FTPClient ftpClient, String fileName, String targetPicPath, String targetFilePath, String tempFilePath, boolean isPic) {
         try {
             // 设置PassiveMode传输
             ftpClient.enterLocalPassiveMode();
@@ -348,9 +355,7 @@ public class FtpUtil {
             String directory = tempFilePath.substring(0, tempFilePath.lastIndexOf("/") + 1);
 
             // 创建服务器远程目录
-            if (targetPicPath != null) {
-                createDirecroty(targetPicPath, ftpClient);
-            }
+            createDirecroty(targetPicPath, ftpClient);
             createDirecroty(targetFilePath, ftpClient);
 
             //cd到根目录
@@ -365,7 +370,11 @@ public class FtpUtil {
             for (FTPFile file : files) {
                 if (file.getName().equals(fileName + "." + ZIP)
                         || file.getName().equals(fileName + "." + RAR)
-                        || file.getName().equals(fileName + "." + JPG)) {
+                        || file.getName().equals(fileName + "." + JPG)
+                        || file.getName().equals(fileName + "." + PNG)) {
+                    fileNameList.add(file.getName());
+                }
+                if (file.getName().equals("thum&" + fileName + "." + PNG)){
                     fileNameList.add(file.getName());
                 }
                 if (file.getName().contains("_")) {
@@ -375,14 +384,29 @@ public class FtpUtil {
 
             if (!CollectionUtils.isEmpty(fileNameList)) {
                 Collections.sort(fileNameList);
+                for (String name : fileNameList) {
+                    if (isPic){
+                        if (name.equals(fileName + "." + JPG)
+                                || name.equals(fileName + "." + PNG)) {
+                            //cd到根目录
+                            ftpClient.changeWorkingDirectory("/");
+                            ftpClient.changeWorkingDirectory(new String(directory.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+                            boolean s = copyFile(ftpClient, name, targetFilePath);
+                            if (!s) {
+                                return false;
+                            }
+                        }
 
-                if (targetFilePath == null) {
-                    boolean s = copyFile(ftpClient, fileNameList.get(0), targetPicPath);
-                    if (!s){
-                        return false;
-                    }
-                } else {
-                    for (String name : fileNameList) {
+                        if (name.equals("thum&" + fileName + "." + PNG)) {
+                            //cd到根目录
+                            ftpClient.changeWorkingDirectory("/");
+                            ftpClient.changeWorkingDirectory(new String(directory.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+                            boolean s = copyFile(ftpClient, name, targetPicPath);
+                            if (!s) {
+                                return false;
+                            }
+                        }
+                    }else {
                         if (name.equals(fileName + "." + ZIP)
                                 || name.equals(fileName + "." + RAR)) {
                             //cd到根目录
@@ -394,7 +418,8 @@ public class FtpUtil {
                             }
                         }
 
-                        if (name.equals(fileName + "." + JPG)) {
+                        if (name.equals(fileName + "." + JPG)
+                                || name.equals(fileName + "." + PNG)) {
                             //cd到根目录
                             ftpClient.changeWorkingDirectory("/");
                             ftpClient.changeWorkingDirectory(new String(directory.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
@@ -404,6 +429,7 @@ public class FtpUtil {
                             }
                         }
                     }
+
                 }
             }
         } catch (IOException e) {
@@ -415,6 +441,7 @@ public class FtpUtil {
 
     /**
      * 复制文件
+     *
      * @param ftpClient
      * @param fileName
      * @param targetPath
@@ -422,18 +449,26 @@ public class FtpUtil {
      * @throws IOException
      */
     private static boolean copyFile(FTPClient ftpClient, String fileName, String targetPath) throws IOException {
-        InputStream input = ftpClient.retrieveFileStream(new String((fileName).getBytes(LOCAL_CHARSET), SERVER_CHARSET));
-        byte[] bytes = IOUtils.toByteArray(input);
-        //ftp传输结束
-        ftpClient.completePendingCommand();
-        System.out.println(ftpClient.printWorkingDirectory());
-        ByteArrayInputStream in = new ByteArrayInputStream(bytes);
-        ftpClient.changeWorkingDirectory(targetPath);
-        ftpClient.enterLocalActiveMode();
-        setFtpEncoding(ftpClient);
-        // 设置以二进制流的方式传输
-        ftpClient.setFileType(FTPClient.BINARY_FILE_TYPE);
-        boolean s = ftpClient.storeFile(new String(fileName.getBytes(LOCAL_CHARSET), SERVER_CHARSET), in);
+        InputStream input = null;
+        boolean s;
+        try {
+            input = ftpClient.retrieveFileStream(new String((fileName).getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+//            byte[] bytes = IOUtils.toByteArray(input);
+            //ftp传输结束
+            ftpClient.completePendingCommand();
+            System.out.println(ftpClient.printWorkingDirectory());
+//        ByteArrayInputStream in = new ByteArrayInputStream(bytes);
+            ftpClient.changeWorkingDirectory(targetPath);
+            ftpClient.enterLocalPassiveMode();
+            setFtpEncoding(ftpClient);
+            // 设置以二进制流的方式传输
+            ftpClient.setFileType(FTPClient.BINARY_FILE_TYPE);
+            s = ftpClient.storeFile(new String(fileName.getBytes(LOCAL_CHARSET), SERVER_CHARSET), input);
+        }finally {
+            if (input != null){
+                input.close();
+            }
+        }
         return s;
     }
 
@@ -456,24 +491,23 @@ public class FtpUtil {
 
     /**
      * 文件重命名
+     *
      * @param ftpClient
      * @param oldName
      * @param filePath
      * @return
      */
-    public static boolean renameFile(FTPClient ftpClient, String oldName, String filePath) {
+    public synchronized static boolean renameFile(FTPClient ftpClient, String oldName, String filePath) {
         try {
             String dir = filePath.substring(0, filePath.lastIndexOf("/"));
             String newName = filePath.substring(filePath.lastIndexOf("/") + 1);
             //cd到根目录
-            ftpClient.changeWorkingDirectory("/");
-            ftpClient.changeWorkingDirectory(dir);
-            ftpClient.enterLocalActiveMode();
+            ftpClient.enterLocalPassiveMode();
             setFtpEncoding(ftpClient);
+            ftpClient.changeWorkingDirectory("/");
+            ftpClient.changeWorkingDirectory(new String(dir.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
             boolean s = ftpClient.rename(new String(oldName.getBytes(LOCAL_CHARSET), SERVER_CHARSET), newName);
-            if (!s){
-                return false;
-            }
+            log.info("FTP重命名返回状态：{}, FTPClient状态：{}", s, ftpClient.getStatus());
         } catch (IOException e) {
             log.error("文件重命名异常", e);
             return false;
@@ -511,15 +545,16 @@ public class FtpUtil {
         }
     }
 
-    public static boolean mergeFiles(FTPClient ftpClient, String remotePath, List<String> nameList, long totalSize) {
+    public static boolean mergeFiles(FTPClient ftpClient, String remotePath, List<String> nameList, long totalSize) throws IOException {
         //服务器文件目录
         String dir = remotePath.substring(0, remotePath.lastIndexOf("/"));
         //合并文件名称
         String file = remotePath.substring(remotePath.lastIndexOf("/") + 1);
         //合并文件后缀
         String fileSuffix = file.substring(file.lastIndexOf(".") + 1);
+        InputStream in = null;
         try {
-            ftpClient.enterLocalActiveMode();
+            ftpClient.enterLocalPassiveMode();
             // 设置文件类型为二进制，与ASCII有区别
             ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
 //            // 判断并设置ftp编码为utf-8或者本地编码
@@ -531,7 +566,6 @@ public class FtpUtil {
 
             List<byte[]> listByte = new ArrayList<>();
             //将分片文件流读取到集合
-            InputStream in;
             long size = 0;
             for (String name : nameList) {
                 log.info("分片文件>>>>>>>>" + name);
@@ -546,32 +580,29 @@ public class FtpUtil {
                 listByte.add(bytes);
             }
             if (totalSize != size) {
-                log.error("服务器文件大小【{}】和文件总大小【{}】不一致", listByte.size(), totalSize);
+                log.error("服务器文件大小【{}】和文件总大小【{}】不一致", size, totalSize);
                 return false;
             }
 
             //开始合并文件
             for (byte[] bytes : listByte) {
                 in = new ByteArrayInputStream(bytes);
-                boolean flag;
-                if (fileSuffix.toLowerCase().equals(PNG)) {
-                    String picName = file.substring(0, file.lastIndexOf(".")) + "." + JPG;
-                    flag = ftpClient.appendFile(new String(picName.getBytes(LOCAL_CHARSET), SERVER_CHARSET), in);
-                } else {
-                    flag = ftpClient.appendFile(new String(file.getBytes(LOCAL_CHARSET), SERVER_CHARSET), in);
-                }
+                boolean flag = ftpClient.appendFile(new String(file.getBytes(LOCAL_CHARSET), SERVER_CHARSET), in);
                 if (!flag) {
                     return false;
                 }
-                log.info("=============文件合并成功=============");
-                in.close();
-                return true;
             }
+
         } catch (IOException e) {
             log.error("合并文件发生异常:{}", e.getMessage());
             return false;
+        }finally {
+            if (in != null){
+                in.close();
+            }
         }
-        return false;
+        log.info("=============文件合并成功=============");
+        return true;
     }
 
     /**
@@ -590,7 +621,7 @@ public class FtpUtil {
             ftpClient.changeWorkingDirectory("/");
             ftpClient.changeWorkingDirectory(new String(dir.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
             boolean s = ftpClient.deleteFile(new String(file.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
-            if (!s){
+            if (!s) {
                 return false;
             }
         } catch (IOException e) {
@@ -598,5 +629,134 @@ public class FtpUtil {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 删除文件夹
+     *
+     * @param ftpClient
+     * @param dirPath
+     * @return
+     */
+    public static boolean deleteRemoteDir(FTPClient ftpClient, String dirPath) {
+        String parentDir = dirPath.substring(0, dirPath.lastIndexOf("/"));
+        String childDir = dirPath.substring(dirPath.lastIndexOf("/") + 1);
+        try {
+            //cd 到根目录
+            ftpClient.changeWorkingDirectory("/");
+            ftpClient.changeWorkingDirectory(new String(parentDir.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+            boolean s = ftpClient.removeDirectory(new String(childDir.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+            if (!s) {
+                return false;
+            }
+        } catch (IOException e) {
+            log.error("目录删除失败", e);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 获取目标文件
+     *
+     * @param ftpClient
+     * @param filePath
+     * @param targetName
+     * @return
+     * @throws ClientException
+     */
+    public static FTPFile getTargetFile(FTPClient ftpClient, String filePath, String targetName) throws ClientException {
+        //目标路径
+        String dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        ftpClient.enterLocalPassiveMode();
+        try {
+            setFtpEncoding(ftpClient);
+            //cd到根目录
+            ftpClient.changeWorkingDirectory("/");
+            ftpClient.changeWorkingDirectory(new String(dir.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+            FTPFile[] files = ftpClient.listFiles();
+            for (FTPFile file : files) {
+                String tar = file.getName().substring(0, file.getName().lastIndexOf("."));
+                if (tar.equals(targetName)) {
+                    return file;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new ClientException("ftp操作异常", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * 获取目标文件流
+     * @param ftpClient
+     * @param filePath
+     * @return
+     */
+    public static InputStream getTargetInputStream(FTPClient ftpClient, String filePath){
+        //目标路径
+        ftpClient.enterLocalPassiveMode();
+        try {
+            setFtpEncoding(ftpClient);
+            //cd到根目录
+            ftpClient.changeWorkingDirectory("/");
+            InputStream inputStream = ftpClient.retrieveFileStream(new String(filePath.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+            return inputStream;
+        }catch (Exception e){
+            log.error("获取文件流出现异常：{}", e);
+            return null;
+        }
+    }
+    /**
+     * 获取制定路径下所有目录及文件的名称集合，由叶子节点-->顶级节点
+     *
+     * @param ftpClient
+     * @param remotePath
+     */
+    public static List<String> findDirAndFile(FTPClient ftpClient, String remotePath) {
+        try {
+            setFtpEncoding(ftpClient);
+            ftpClient.enterLocalPassiveMode();
+            ftpClient.changeWorkingDirectory("/");
+            ftpClient.changeWorkingDirectory(new String(remotePath.getBytes(LOCAL_CHARSET), SERVER_CHARSET));
+            FTPFile[] files = ftpClient.listFiles();
+            List<String> nameList = null;
+            if (files.length > 0) {
+                nameList = Arrays.stream(files).map(x -> remotePath + "/" + x.getName()).collect(Collectors.toList());
+            }
+            return nameList;
+        } catch (IOException e) {
+            log.error("获取文件夹及文件名产生异常：{}", e);
+            return null;
+        }
+    }
+
+    /**
+     * 删除指定路径下所有文件和文件夹
+     */
+    public static boolean deleteAll(FTPClient ftpClient, List<String> dirList, List<String> fileList) {
+        try {
+            ftpClient.enterLocalActiveMode();
+            setFtpEncoding(ftpClient);
+            if (!CollectionUtils.isEmpty(fileList)) {
+                for (String name : fileList) {
+                    if (deleteRemoteFile(ftpClient, name)){
+                        log.info(">>>>>>>>>>已删除临时文件：{}", name);
+                    }
+                }
+            }
+            if (!CollectionUtils.isEmpty(dirList)) {
+                for (String name : dirList) {
+                    if (deleteRemoteDir(ftpClient, name)){
+                        log.info(">>>>>>>>>>已删除临时文件夹：{}", name);
+                    }
+                }
+            }
+            return true;
+        } catch (IOException e) {
+            log.error("删除文件出现异常：{}", e);
+            return false;
+        }
     }
 }
